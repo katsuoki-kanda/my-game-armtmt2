@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Hand Game Online - PC & Mobile (Fixed Layout)</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <style>
+        body { margin: 0; background-color: #000; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; font-family: sans-serif; touch-action: none; }
+        #container { position: relative; width: 100vw; height: 100vh; }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
+        video { display: none; }
+
+        /* モバイル音声解除用のオーバーレイ */
+        #audio-init { 
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%; 
+            background: rgba(0,0,0,0.9); display: flex; align-items: center; justify-content: center; 
+            z-index: 100; cursor: pointer; text-align: center;
+        }
+        #audio-init p { font-size: 24px; color: #fff; border: 2px solid #fff; padding: 20px; border-radius: 10px; }
+    </style>
+</head>
+<body>
+
+<div id="audio-init">
+    <p>画面をタップして開始<br>(音声を有効にします)</p>
+</div>
+
+<div id="container">
+    <video id="input_video" playsinline muted></video>
+    <canvas id="output_canvas"></canvas>
+</div>
+
+<script>
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const audioInit = document.getElementById('audio-init');
+
+    let score = 0;
+    let gameStarted = false;
+    let cameraReady = false; 
+    let startTime = 0;
+    let nextStartEnabledTime = 0;
+    const gameDuration = 40;
+    
+    let circleRadius = 42;
+    let fontSizeInsideCircle = 40;    
+
+    let circles = [];
+    let targetCount = 1;
+    let audioEnabled = false;
+
+    let uiBoxWidth = 250;
+    let uiBoxHeight = 70;
+    let uiMargin = 10;
+
+    audioInit.addEventListener('click', () => {
+        audioEnabled = true;
+        audioInit.style.display = 'none';
+        speak(""); 
+    });
+
+    function speak(text) {
+        if (!audioEnabled) return;
+        window.speechSynthesis.cancel();
+        const utter = new SpeechSynthesisUtterance(text);
+        utter.lang = 'ja-JP';
+        window.speechSynthesis.speak(utter);
+    }
+
+    function playBeep() {
+        if (!audioEnabled) return;
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const oscillator = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+        oscillator.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(900, audioCtx.currentTime);
+        oscillator.start();
+        gainNode.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.1);
+        oscillator.stop(audioCtx.currentTime + 0.1);
+    }
+
+    function updateCanvasSize() {
+        canvasElement.width = window.innerWidth;
+        canvasElement.height = window.innerHeight;
+        
+        const minDim = Math.min(canvasElement.width, canvasElement.height);
+        circleRadius = minDim * 0.08;
+        fontSizeInsideCircle = Math.floor(circleRadius * 1.2);
+        uiBoxWidth = canvasElement.width * 0.25;
+        uiBoxHeight = canvasElement.height * 0.1;
+        if (uiBoxWidth > 200) uiBoxWidth = 200;
+        if (uiBoxHeight > 60) uiBoxHeight = 60;
+    }
+    window.addEventListener('resize', updateCanvasSize);
+    updateCanvasSize();
+
+    function generateCircles() {
+        circles = [];
+        targetCount = 1;
+        const randomOrder = Array.from({length: 10}, (_, i) => i + 1).sort(() => Math.random() - 0.5);
+        
+        const sideMargin = 2*circleRadius; 
+        const playableWidth = canvasElement.width - (sideMargin * 2);
+        const partWidth = playableWidth / 10; 
+
+        const topBoundary = uiBoxHeight + uiMargin + circleRadius + 20;
+        const bottomBoundary = canvasElement.height * 0.85; 
+        const availableHeight = bottomBoundary - topBoundary;
+
+        for (let i = 0; i < 10; i++) {
+            let x, y;
+            let isValid = false;
+            let attempts = 0;
+
+            while (!isValid && attempts < 100) {
+                // 各エリアの中でランダムに配置
+                const minX = sideMargin + (partWidth * i);
+                const maxX = sideMargin + (partWidth * (i + 1));
+                
+                x = Math.random() * (maxX - minX) + minX;
+                y = Math.random() * availableHeight + topBoundary;
+
+                // 1. 他の円との重なりチェック
+                let overlaps = false;
+                for (let other of circles) {
+                    const dist = Math.sqrt((x - other.x) ** 2 + (y - other.y) ** 2);
+                    if (dist < circleRadius * 2.2) { // 少し余裕を持たせて判定
+                        overlaps = true;
+                        break;
+                    }
+                }
+
+                // 2. UIエリアとの重複チェック
+                const inScoreArea = (x < uiBoxWidth + sideMargin && y < uiBoxHeight + uiMargin + circleRadius);
+                const inTimerArea = (x > canvasElement.width - uiBoxWidth - sideMargin && y < uiBoxHeight + uiMargin + circleRadius);
+
+                if (!overlaps && !inScoreArea && !inTimerArea) {
+                    isValid = true;
+                }
+                attempts++;
+            }
+            circles.push({ x: x, y: y, value: randomOrder[i], hit: false });
+        }
+    }
+
+    function checkCollision(hx, hy, cx, cy) {
+        const dist = Math.sqrt((hx - cx) ** 2 + (hy - cy) ** 2);
+        return dist < circleRadius + (circleRadius * 0.8);
+    }
+
+    function onResults(results) {
+        cameraReady = true; 
+        const currentTime = Date.now();
+
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        canvasCtx.translate(canvasElement.width, 0);
+        canvasCtx.scale(-1, 1);
+        canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+        let timeLeft = 0;
+        if (gameStarted) {
+            timeLeft = Math.max(0, gameDuration - Math.floor((currentTime - startTime) / 1000));
+            if (timeLeft <= 0) {
+                gameStarted = false;
+                nextStartEnabledTime = currentTime + 3000;
+                speak(score + "点です。終了。");
+            }
+        }
+
+        let hands = [];
+        if (results.poseLandmarks) {
+            const lIdx = results.poseLandmarks[19];
+            const rIdx = results.poseLandmarks[20];
+            
+            hands.push({ x: lIdx.x * canvasElement.width, y: lIdx.y * canvasElement.height });
+            hands.push({ x: rIdx.x * canvasElement.width, y: rIdx.y * canvasElement.height });
+
+            hands.forEach(h => {
+                canvasCtx.beginPath();
+                canvasCtx.arc(h.x, h.y, circleRadius * 0.8, 0, 2 * Math.PI);
+                canvasCtx.strokeStyle = 'yellow';
+                canvasCtx.lineWidth = 6;
+                canvasCtx.stroke();
+            });
+
+            if (!gameStarted && currentTime > nextStartEnabledTime) {
+                if (lIdx.y < 0.35 || rIdx.y < 0.35) {
+                    gameStarted = true;
+                    score = 0;
+                    startTime = Date.now();
+                    generateCircles();
+                    speak("スタート");
+                }
+            }
+        }
+
+        if (gameStarted) {
+            let allHit = true;
+            circles.forEach(c => {
+                if (!c.hit) {
+                    allHit = false;
+                    if (c.value === targetCount) {
+                        hands.forEach(h => {
+                            if (checkCollision(h.x, h.y, c.x, c.y)) {
+                                c.hit = true;
+                                score++;
+                                targetCount++;
+                                playBeep();
+                            }
+                        });
+                    }
+                    
+                    canvasCtx.beginPath();
+                    canvasCtx.arc(c.x, c.y, circleRadius, 0, 2 * Math.PI);
+                    canvasCtx.fillStyle = 'red';
+                    canvasCtx.fill();
+                    
+                    canvasCtx.save();
+                    canvasCtx.translate(c.x, c.y);
+                    canvasCtx.scale(-1, 1);
+                    canvasCtx.fillStyle = 'lime';
+                    canvasCtx.font = `bold ${fontSizeInsideCircle}px Arial`;
+                    canvasCtx.textAlign = "center";
+                    canvasCtx.textBaseline = "middle";
+                    canvasCtx.fillText(c.value, 0, 0);
+                    canvasCtx.restore();
+                } else {
+                    canvasCtx.beginPath();
+                    canvasCtx.arc(c.x, c.y, circleRadius, 0, 2 * Math.PI);
+                    canvasCtx.fillStyle = 'rgba(0, 255, 0, 0.5)';
+                    canvasCtx.fill();
+                }
+            });
+            if (allHit) {
+                // すべてヒットしたら一呼吸置いて次を生成（重なり防止の安全策）
+                generateCircles();
+            }
+        }
+
+        canvasCtx.restore(); 
+
+        canvasCtx.fillStyle = "rgba(0, 0, 0, 0.4)";
+        canvasCtx.fillRect(uiMargin, uiMargin, uiBoxWidth, uiBoxHeight);
+        canvasCtx.fillStyle = "lime";
+        canvasCtx.font = `bold ${uiBoxHeight * 0.5}px Arial`;
+        canvasCtx.textAlign = "left";
+        canvasCtx.textBaseline = "middle";
+        canvasCtx.fillText(`Score: ${score}`, uiMargin + 10, uiMargin + (uiBoxHeight / 2));
+        
+        canvasCtx.fillStyle = "rgba(0, 0, 0, 0.4)";
+        canvasCtx.fillRect(canvasElement.width - uiBoxWidth - uiMargin, uiMargin, uiBoxWidth, uiBoxHeight);
+        canvasCtx.fillStyle = "white";
+        canvasCtx.fillText(`Time: ${timeLeft}`, canvasElement.width - uiBoxWidth - uiMargin + 10, uiMargin + (uiBoxHeight / 2));
+
+        if (!gameStarted) {
+            canvasCtx.textAlign = "center";
+            if (currentTime < nextStartEnabledTime) {
+                const waitSec = Math.ceil((nextStartEnabledTime - currentTime) / 1000);
+                canvasCtx.font = "bold 40px Arial";
+                canvasCtx.fillStyle = "orange";
+                canvasCtx.fillText(`Wait... ${waitSec}`, canvasElement.width / 2, canvasElement.height / 2);
+            } else {
+                canvasCtx.font = "bold 50px Arial";
+                canvasCtx.fillStyle = "red";
+                canvasCtx.fillText("片手を挙げてスタート", canvasElement.width / 2, canvasElement.height / 2);
+            }
+        }
+    }
+
+    function drawInitialLoading() {
+        if (!cameraReady) {
+            canvasCtx.fillStyle = "black";
+            canvasCtx.fillRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.fillStyle = "white";
+            canvasCtx.font = "bold 30px Arial";
+            canvasCtx.textAlign = "center";
+            canvasCtx.fillText("カメラ起動中...", canvasElement.width / 2, canvasElement.height / 2);
+            requestAnimationFrame(drawInitialLoading);
+        }
+    }
+    drawInitialLoading();
+
+    const pose = new Pose({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}` });
+    pose.setOptions({ modelComplexity: 1, smoothLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+    pose.onResults(onResults);
+
+    const camera = new Camera(videoElement, {
+        onFrame: async () => { await pose.send({image: videoElement}); },
+        width: 1280, height: 720,
+        facingMode: 'user'
+    });
+    camera.start();
+
+    speak("カメラ起動ちゅう");
+</script>
+</body>
+</html>
